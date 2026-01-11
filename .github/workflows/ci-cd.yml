@@ -2,7 +2,9 @@ name: DevOps Assignment CI/CD
 
 on:
   push:
-    branches: [develop, main]
+    branches:
+      - develop
+      - main
 
 env:
   AWS_REGION: us-east-1
@@ -11,32 +13,104 @@ env:
   FRONTEND_IMAGE: frontend
 
 jobs:
+# =========================================================
+# BUILD, TEST & PUSH (develop branch)
+# =========================================================
   build-test-push:
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       # ---------- BACKEND TESTS ----------
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - run: |
+      - name: Backend tests
+        run: |
           cd backend
           pip install -r requirements.txt
-          pytest || echo "No tests found"
+          pytest || echo "No backend tests"
 
       # ---------- FRONTEND TESTS ----------
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      - run: |
+      - name: Frontend tests
+        run: |
           cd frontend
           npm install
-          npm test -- --watch=false || echo "No tests found"
+          npm test -- --watch=false || echo "No frontend tests"
+
+      # ---------- AWS AUTH ----------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------- GCP AUTH ----------
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker for GCP
+        run: |
+          gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      # ---------- BUILD & PUSH ----------
+      - name: Build & Push Images
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+
+          # ---------- BACKEND ----------
+          docker build -t $BACKEND_IMAGE backend
+
+          docker tag $BACKEND_IMAGE \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$BACKEND_IMAGE:$IMAGE_TAG
+          docker push \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$BACKEND_IMAGE:$IMAGE_TAG
+
+          docker tag $BACKEND_IMAGE \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/devops-assignment/$BACKEND_IMAGE:$IMAGE_TAG
+          docker push \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/devops-assignment/$BACKEND_IMAGE:$IMAGE_TAG
+
+          # ---------- FRONTEND ----------
+          docker build -t $FRONTEND_IMAGE frontend
+
+          docker tag $FRONTEND_IMAGE \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$FRONTEND_IMAGE:$IMAGE_TAG
+          docker push \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$FRONTEND_IMAGE:$IMAGE_TAG
+
+          docker tag $FRONTEND_IMAGE \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/devops-assignment/$FRONTEND_IMAGE:$IMAGE_TAG
+          docker push \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/devops-assignment/$FRONTEND_IMAGE:$IMAGE_TAG
+
+
+# =========================================================
+# DEPLOY (main branch)
+# =========================================================
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       # ---------- AWS ----------
       - uses: aws-actions/configure-aws-credentials@v4
@@ -45,28 +119,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: aws-actions/amazon-ecr-login@v2
-
       # ---------- GCP ----------
       - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - run: |
-          gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+      # ---------- TERRAFORM ----------
+      - uses: hashicorp/setup-terraform@v3
 
-      # ---------- BUILD & PUSH ----------
-      - name: Build & Push Images
+      - name: Terraform Apply AWS
         run: |
-          IMAGE_TAG=${{ github.sha }}
+          cd terraform/aws
+          terraform init -input=false
+          terraform apply -auto-approve
 
-          docker build -t $BACKEND_IMAGE backend
-          docker tag $BACKEND_IMAGE \
-            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$BACKEND_IMAGE:$IMAGE_TAG
-          docker push \
-            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$BACKEND_IMAGE:$IMAGE_TAG
-
-          docker tag $BACKEND_IMAGE \
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/devops-assignment/$BACKEND_IMAGE:$IMAGE_TAG
-          docker push \
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/devops-assignment/$BACKEND_IMAGE:$IMAGE_TAG
+      - name: Terraform Apply GCP
+        run: |
+          cd terraform/gcp
+          terraform init -input=false
+          terraform apply -auto-approve
